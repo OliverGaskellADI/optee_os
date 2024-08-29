@@ -51,47 +51,50 @@ register_phys_mem(MEM_AREA_IO_SEC, ADSP_SC5XX_TRNG0_BASE, ADSP_SC5XX_TRNG0_SIZE)
 
 static vaddr_t rng __nex_bss;
 
-uint8_t hw_get_random_byte(void) {
-	static int pos;
-	static union {
-		uint32_t val[4];
-		uint8_t byte[16];
-	} random;
+TEE_Result hw_get_random_bytes(void* buf, size_t blen) {
+	static int fifo_i;
+	static uint32_t fifo[4];
 	uint8_t ret;
 
-	if (!pos) {
-		/* Is the result ready (available)? */
-		while (!(io_read32(rng + TRNG_STAT) & TRNG_STAT_RDY)) {
-			/* Is the shutdown threshold reached? */
-			if (io_read32(rng + TRNG_STAT) & TRNG_STAT_SHDNOVR) {
-				uint32_t alarm = io_read32(rng + TRNG_ALMSTP);
-				uint32_t tune = io_read32(rng + TRNG_FRODETUNE);
+	uint8_t *buffer = buf;
+	size_t buffer_i = 0;
 
-				/* Clear the alarm events */
-				io_write32(rng + TRNG_ALMMSK, 0x0);
-				io_write32(rng + TRNG_ALMSTP, 0x0);
-				/* De-tune offending FROs */
-				io_write32(rng + TRNG_FRODETUNE, tune ^ alarm);
-				/* Re-enable the shut down FROs */
-				io_write32(rng + TRNG_FROEN, TRNG_FROEN_FROS_MASK);
-				/* Clear the shutdown overflow event */
-				io_write32(rng + TRNG_INTACK, TRNG_STAT_SHDNOVR);
+	while (buffer_i < blen) {
+		if (!fifo_i) { // If we've exhausted the cached values, read more
+			/* Is the result ready (available)? */
+			while (!(io_read32(rng + TRNG_STAT) & TRNG_STAT_RDY)) {
+				/* Is the shutdown threshold reached? */
+				if (io_read32(rng + TRNG_STAT) & TRNG_STAT_SHDNOVR) {
+					uint32_t alarm = io_read32(rng + TRNG_ALMSTP);
+					uint32_t tune = io_read32(rng + TRNG_FRODETUNE);
 
-				DMSG("Fixed FRO shutdown\n");
+					/* Clear the alarm events */
+					io_write32(rng + TRNG_ALMMSK, 0x0);
+					io_write32(rng + TRNG_ALMSTP, 0x0);
+					/* De-tune offending FROs */
+					io_write32(rng + TRNG_FRODETUNE, tune ^ alarm);
+					/* Re-enable the shut down FROs */
+					io_write32(rng + TRNG_FROEN, TRNG_FROEN_FROS_MASK);
+					/* Clear the shutdown overflow event */
+					io_write32(rng + TRNG_INTACK, TRNG_STAT_SHDNOVR);
+
+					DMSG("Fixed FRO shutdown\n");
+				}
 			}
+			/* Read random value */
+			fifo[0] = io_read32(rng + TRNG_OUTPUT0);
+			fifo[1] = io_read32(rng + TRNG_OUTPUT1);
+			fifo[2] = io_read32(rng + TRNG_OUTPUT2);
+			fifo[3] = io_read32(rng + TRNG_OUTPUT3);
+			/* Acknowledge read complete */
+			io_write32(rng + TRNG_INTACK, TRNG_STAT_RDY);
 		}
-		/* Read random value */
-		random.val[0] = io_read32(rng + TRNG_OUTPUT0);
-		random.val[1] = io_read32(rng + TRNG_OUTPUT1);
-		random.val[2] = io_read32(rng + TRNG_OUTPUT2);
-		random.val[3] = io_read32(rng + TRNG_OUTPUT3);
-		/* Acknowledge read complete */
-		io_write32(rng + TRNG_INTACK, TRNG_STAT_RDY);
+
+		buffer[buffer_i++] = fifo[fifo_i];
+		fifo_i = (fifo_i + 1) % 4;
 	}
 
-	ret = random.byte[pos];
-	pos = (pos + 1) % 16;
-	return ret;
+	return TEE_SUCCESS;
 }
 
 static TEE_Result sc59x_trng_init(void) {
